@@ -1,0 +1,13 @@
+# General Configuration
+"model_id": "Qwen/Qwen2-VL-2B-Instruct"
+"model_api_key": ""
+"clip_model_id": 'openai/clip-vit-large-patch14'
+"data_path": "./data/original"
+"output_path": "./data"
+"device_map": "auto"
+# Retrieval Specific Configuration 
+# "google_oauth_credentials": "..."
+# "google_customsearch_key": "..."
+# "bing_ocp_apim_subscription_key": "..."
+"wiki_user_agent": "MyFactChecker/1.0"
+"wiki_authorization_bearer_key": "..."
