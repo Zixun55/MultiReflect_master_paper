@@ -6,6 +6,7 @@ import ranking.freshness as freshness
 import os
 import json
 import pandas as pd
+import numpy as np
 import csv
 
 def get_relevance_score(text):
@@ -27,15 +28,23 @@ def get_support_score(text):
         return 1
     elif '[Partially supported]' in text:
         return 0.5
-    elif '[No support / Contradictory]' in text:
+    elif '[No support / Contradictory]' in text or '[No support]' in text:
         return 0
+    elif '[Partially contradictory]' in text:
+        return -0.5
+    elif '[Fully contradictory]' in text:
+        return -1.0
     else:
         if 'Fully supported' in text:
             return 1
         elif 'Partially supported' in text:
             return 0.5
-        elif 'No support / Contradictory' in text:
+        elif 'No support / Contradictory' in text or 'No support' in text:
             return 0
+        elif 'Partially contradictory' in text:
+            return -0.5
+        elif 'Fully contradictory' in text:
+            return -1.0
         else:
             print('Error: support score not found', text)
             return 0
@@ -69,11 +78,13 @@ def get_usefulness_score(text):
     return 0
 
 def get_text_scores(file_name, caption, image_path, client):
+    support_eval_type = "proposed"
+
     text_rel = relevance.get_text_to_image_relevance_sample(file_name, image_path, client)
-    text_sup = support.get_text_support_sample(file_name, caption, image_path, client)
+    text_sup = support.get_text_support_sample(file_name, caption, image_path, eval_type=support_eval_type, client=client)
     text_use = useful.get_text_useful_sample(file_name, caption, image_path, client)
     text_aut = authoritative.get_authoritative_scores(file_name)
-    text_fresh = freshness.get_freshness_scores(file_name)
+    text_fresh = freshness.get_freshness_scores(file_name, caption, eval_type="proposed", client=client)
     
     if not os.path.exists(f'./data/ranking_score/{file_name}/text_data'):
         os.makedirs(f'./data/ranking_score/{file_name}/text_data')
@@ -89,6 +100,24 @@ def get_text_scores(file_name, caption, image_path, client):
         json.dump(text_fresh, f)
     
     evidence = json.load(open(f'./data/filtered/{file_name}/text_data/paragraphs.json'))
+
+    if support_eval_type == "proposed":
+    # 計算support的標準差以動態調整權重
+        all_raw_support_scores = []
+        for k, v in evidence.items():
+            for idx in range(len(v)):
+                try:
+                    score = get_support_score(text_sup[k][idx])
+                    all_raw_support_scores.append(score)
+                except:
+                    all_raw_support_scores.append(0)
+        
+        # 計算標準差
+        claim_support_std = np.std(all_raw_support_scores) if all_raw_support_scores else 0
+        
+        # 定義support動態權重：1 / (1 + std)
+        support_weight = 1 / (1 + claim_support_std)
+
     final_metrics = []
     for k, v in evidence.items():
         for idx in range(len(v)):
@@ -106,7 +135,11 @@ def get_text_scores(file_name, caption, image_path, client):
             except:
                 metrics['relevance'] = 0
             try:
-                metrics['support'] = get_support_score(text_sup[k][idx])
+                if support_eval_type == "proposed":
+                    raw_s = get_support_score(text_sup[k][idx])
+                    metrics['support'] = raw_s * support_weight
+                else:
+                    metrics['support'] = get_support_score(text_sup[k][idx])
             except:
                 metrics['support'] = 0
             try:
@@ -142,8 +175,10 @@ def get_text_scores(file_name, caption, image_path, client):
     df.to_csv(f'./data/ranking_score/{file_name}/text_data/final_scores.csv', index=False)
     
 def get_image_scores(file_name, caption, image_path, client):
+    support_eval_type = "proposed"
+
     image_rel = relevance.get_image_to_text_relevance_sample(file_name, caption, client)
-    image_sup = support.get_image_support_sample(file_name, caption, image_path, client)
+    image_sup = support.get_image_support_sample(file_name, caption, image_path, client, eval_type=support_eval_type)
     image_use = useful.get_image_useful_sample(file_name, caption, image_path, client)
     
     if not os.path.exists(f'./data/ranking_score/{file_name}/image_data'):
@@ -156,9 +191,22 @@ def get_image_scores(file_name, caption, image_path, client):
         json.dump(image_use, f)
     
     evidence = os.listdir(f'./data/filtered/{file_name}/image_data/')
+
+    if support_eval_type == "proposed":
+        all_raw_image_support = []
+        for img_key in evidence:
+            try:
+                all_raw_image_support.append(get_support_score(image_sup[img_key]))
+            except:
+                all_raw_image_support.append(0)
+        
+        img_support_std = np.std(all_raw_image_support) if all_raw_image_support else 0
+        img_support_weight = 1 / (1 + img_support_std)
+
     final_metrics = []
     for idx in range(len(evidence)):
         metrics = {}
+        current_img_name = evidence[idx]
         try:
             metrics['evidence'] = evidence[idx]
         except:
@@ -168,7 +216,11 @@ def get_image_scores(file_name, caption, image_path, client):
         except:
             metrics['relevance'] = 0
         try:
-            metrics['support'] = get_support_score(image_sup[evidence[idx]])
+            if support_eval_type == "proposed":
+                raw_s = get_support_score(image_sup[current_img_name])
+                metrics['support'] = raw_s * img_support_weight
+            else:
+                metrics['support'] = get_support_score(image_sup[img_key])
         except:
             metrics['support'] = 0
         try:
