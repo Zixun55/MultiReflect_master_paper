@@ -7,6 +7,7 @@ import string
 from tqdm import tqdm
 from typing import List
 from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, set_seed
+from transformers import Qwen2VLForConditionalGeneration
 import pandas as pd
 
 def normalize_answer(s: str) -> str:
@@ -30,102 +31,119 @@ def call_llm(prompt: str, generator, max_new_tokens: int = 128) -> str:
     return output[0]["generated_text"][-1]['content'].strip()
 
 
-def agent_response(query: str, document: str, generator, history: str = ""):
+def agent_response(query: str, document: str, score: float, generator, history: str = ""):
+    core_instruction = (
+        "- CRITICAL: Compare dates (years), specific locations, and named entities in the Document against the Question.\n"
+        "- If the Document confirms the image but mentions a DIFFERENT YEAR or LOCATION than the caption, you MUST label it as 'MC' (Miscaptioned).\n"
+        "- Be skeptical. Do not ignore small factual contradictions just because the overall theme matches."
+    )
+    # 根據分數給予不同指令
     if history:
-        prompt = f"""You are an agent reading a document to answer a question.
+        prompt = f"""You are a professional fact-checking agent. Your evidence has a MultiReflect Reliability Score of {score}/6.0.
 
-Question: {query}
-Document: {document}
+            Question: {query}
+            Your Document: {document}
 
-The following reponses are from other agents as additional information.
-{history}
-Answer the question based on the document and other agents' response. Provide your answer and a step-by-step reasoning explanation.  
-Please follow the format: 'Answer: {{}}. Explanation: {{}}.''"""
+            Other agents' responses:
+            {history}
+
+            Task: Based on your score and the provided evidence, resolve any conflicts with other agents. 
+            {core_instruction}
+            - If your score is higher, defend your point and challenge others' evidence.
+            - If others have higher scores, critically re-evaluate your stance.
+            Provide your answer (True, OOC, or MC) and reasoning.
+            Format: 'Answer: {{}}. Explanation: {{}}.'"""
     else:
-        prompt = f"""You are an agent reading a document to answer a question.
+        prompt = f"""You are a professional fact-checking agent. Your evidence has a MultiReflect Reliability Score of {score}/6.0.
+            Question: {query}
+            Your Document: {document}
+            Task: Provide your initial verdict (True, OOC, or MC) based on this document.
+            {core_instruction}
 
-Question: {query}
-Document: {document}
+            Format: 'Answer: {{}}. Explanation: {{}}.'"""
 
-Answer the question based only on this document. Provide your answer and a step-by-step reasoning explanation.
-Please follow the format: 'Answer: {{}}. Explanation: {{}}.''"""
+    return call_llm(prompt, generator)
 
-    output = call_llm(prompt, generator)
-    return output
+def aggregate_responses(query: str, responses: List[str], scores: List[float], generator):
+    joined = "\n".join([f"Agent {i+1} (Reliability Score: {scores[i]}): {r}" for i, r in enumerate(responses)])
+    prompt = f"""You are a master aggregator resolving conflicts between fact-checking agents. 
 
+                Question: {query}
+                Agent Debates with Reliability Scores:
+                {joined}
 
-def aggregate_responses(query: str, responses: List[str], generator):
-    joined = "\n".join([f"Agent {i+1}: {r}" for i, r in enumerate(responses)])
-    prompt = f"""You are an aggregator reading answers from multiple agents.
+                Instructions:
+                1. Prioritize agents with higher Reliability Scores.
+                2. Resolve any contradictions and choose the most supported label (True, OOC, or MC).
+                3. YOU MUST CONCLUDE YOUR RESPONSE WITH THE FOLLOWING FORMAT:
+                Final Verdict: <Label>
+                Reason: <Brief Explanation>
 
-If there are multiple answers, please provide all possible correct answers and also provide a step-by-step reasoning explanation. If there is no correct answer, please reply 'unknown'.
-Please follow the format: 'All Correct Answers: []. Explanation: {{}}.'
-
-The following are examples:
-Question: In which year was Michael Jordan born?
-Agent responses:
-Agent 1: Answer: 1963. Explanation: The document clearly states that Michael Jeffrey Jordan was born on February 17, 1963. 
-Agent 2: Answer: 1956. Explanation: The document states that Michael Irwin Jordan was born on February 25, 1956. However, it's important to note that this document seems to be about a different Michael Jordan, who is an American scientist, not the basketball player. The other agents' responses do not align with the information provided in the document.
-Agent 3: Answer: 1998. Explanation: The According to the document provided, Michael Jeffrey Jordan was born on February 17, 1998.
-Agent 4: Answer: Unknown. Explanation: The provided document focuses on Jordan's college and early professional career, mentioning his college championship in 1982 and his entry into the NBA in 1984, but it does not include information about his birth year.
-All Correct Answers: ["1963", "1956"]. Explanation: Agent 1 is talking about the basketball player Michael Jeffrey Jordan, who was born on Februray 17, 1963, so 1963 is correct. Agent 2 is talking about another person named Michael Jordan, who is an American scientist, and he was born in 1956. Therefore, the answer 1956 from Agent 2 is also correct. Agent 3 provides an error stating Michael Jordan's birth year as 1998, which is incorrect. Based on the correct information from Agent 1, Michael Jeffrey Jordan was born on February 17, 1963. Agent 4 does not provide any useful information.
-
-Question: {query}
-Agent responses:
-{joined}
-"""
+                Replace <Label> with exactly one of: [True, OOC, MC]."""
+    
     return call_llm(prompt, generator)
 
 
-def multi_agent_debate(query: str, documents: List[str], generator, num_rounds: int = 3):
+def multi_agent_debate(query: str, documents: List[str], scores: List[float], generator, num_rounds: int = 3):
     records = {}
     num_agents = len(documents)
     agent_outputs = []
 
     # Round 1
     records["round1"] = {"answers": [], "explanations": []}
-    for doc in documents:
-        response = agent_response(query, doc, generator)
-        answer = response[response.find("Answer: ") + len("Answer: "):response.find("Explanation")].strip()
-        explanation = response[response.find("Explanation: ") + len("Explanation: "):]
+    for i in range(num_agents):
+        response = agent_response(query, documents[i], scores[i], generator)
+        # 解析 Answer 與 Explanation
+        ans_start = response.find("Answer: ") + len("Answer: ")
+        exp_start = response.find("Explanation: ") + len("Explanation: ")
+        answer = response[ans_start:response.find("Explanation")].strip()
+        explanation = response[exp_start:].strip()
+        
         records["round1"]["answers"].append(answer)
         records["round1"]["explanations"].append(explanation)
         agent_outputs.append(response)
-    records["round1"]["aggregation"] = aggregate_responses(query, agent_outputs, generator)
-
+    
+    records["round1"]["aggregation"] = aggregate_responses(query, agent_outputs, scores, generator)
+    
     # Additional rounds
-    final_aggregation = None
+    final_aggregation = records["round1"]["aggregation"]
     for t in range(1, num_rounds):
         round_key = f"round{t+1}"
         records[round_key] = {"answers": [], "explanations": []}
         new_outputs = []
-        for i, doc in enumerate(documents):
+        
+        for i in range(num_agents):
             history = "\n".join([f"Agent {j+1}: {agent_outputs[j]}" for j in range(num_agents) if j != i])
-            response = agent_response(query, doc, generator, history)
-            answer = response[response.find("Answer: ") + len("Answer: "):response.find("Explanation")].strip()
-            explanation = response[response.find("Explanation: ") + len("Explanation: "):]
+            
+            response = agent_response(query, documents[i], scores[i], generator, history)
+            
+            ans_start = response.find("Answer: ") + len("Answer: ")
+            exp_start = response.find("Explanation: ") + len("Explanation: ")
+            answer = response[ans_start:response.find("Explanation")].strip()
+            explanation = response[exp_start:].strip()
+            
             records[round_key]["answers"].append(answer)
             records[round_key]["explanations"].append(explanation)
             new_outputs.append(response)
+            
         agent_outputs = new_outputs
-        pred_ans_list = []
-        for ans in records[round_key]["answers"]:
-            pred_ans_list.append(normalize_answer(ans))
-        prev_pred_ans_list = []
-        for ans in records[f"round{t}"]["answers"]:
-            prev_pred_ans_list.append(normalize_answer(ans))
-        assert len(pred_ans_list) == len(prev_pred_ans_list)
+        
+        pred_ans_list = [normalize_answer(ans) for ans in records[round_key]["answers"]]
+        prev_pred_ans_list = [normalize_answer(ans) for ans in records[f"round{t}"]["answers"]]
+        
         flag = True
         for k in range(len(pred_ans_list)):
             if pred_ans_list[k] in prev_pred_ans_list[k] or prev_pred_ans_list[k] in pred_ans_list[k]:
                 continue
             else:
                 flag = False
+                break
+        
         if flag:
             final_aggregation = records[f"round{t}"]["aggregation"]
             break
         else:
-            records[round_key]["aggregation"] = aggregate_responses(query, agent_outputs, generator)
+            records[round_key]["aggregation"] = aggregate_responses(query, agent_outputs, scores, generator)
             final_aggregation = records[round_key]["aggregation"]
 
     records["final_aggregation"] = final_aggregation
@@ -134,50 +152,104 @@ def multi_agent_debate(query: str, documents: List[str], generator, num_rounds: 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, required=True)
-    parser.add_argument("--cache_dir", type=str, default="./cache")
     parser.add_argument("--data_path", type=str, required=True)
     parser.add_argument("--num_rounds", type=int, default=3)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cache_dir", type=str, default="./cache")
     args = parser.parse_args()
 
-    hf_token = os.getenv('HF_TOKEN', None)
-    args.output_path = f"{args.data_path}_madam_rag_{args.model_name.split('/')[-1]}_rounds{args.num_rounds}.jsonl"
+    verite_path = os.path.join(args.data_path, "./original/VERITE.csv")
+    if not os.path.exists(verite_path):
+        print(f"Error: {verite_path} not found.")
+        return
+    df_verite = pd.read_csv(verite_path)
+
+    MODEL_NAME = "Qwen/Qwen2-VL-2B-Instruct"
 
     set_seed(42)
-
+    print(f"Loading model: {MODEL_NAME}")
+    
     bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_use_double_quant=True,
+        load_in_4bit=True, 
+        bnb_4bit_quant_type="nf4", 
+        bnb_4bit_compute_dtype=torch.float16, 
+        bnb_4bit_use_double_quant=True
     )
-
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        quantization_config=bnb_config,
+    
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
+        MODEL_NAME, 
+        quantization_config=bnb_config, 
         torch_dtype=torch.float16,
         cache_dir=args.cache_dir,
-        token=hf_token,
+        device_map="auto",
+        trust_remote_code=True
+    )
+    
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, cache_dir=args.cache_dir)
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    
+    generator = pipeline(
+        "text-generation", 
+        model=model, 
+        tokenizer=tokenizer, 
+        trust_remote_code=True, 
+        device_map="auto"
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, cache_dir=args.cache_dir, token=hf_token)
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    generator = pipeline("text-generation", model=model, tokenizer=tokenizer, trust_remote_code=True, device_map="auto")
+    ranking_dir = os.path.join(args.data_path, "ranking_score")
+    if not os.path.exists(ranking_dir):
+        print(f"Error: Directory {ranking_dir} does not exist.")
+        return
 
-    with open(args.data_path, "r") as f:
-        all_data = [json.loads(line.strip()) for line in f]
+    # 找出所有是數字的資料夾名稱，並按數字大小排序
+    folder_indices = sorted([f for f in os.listdir(ranking_dir) if f.isdigit() and int(f) <= 99], key=int)
+    print(f"Detected {len(folder_indices)} cases. Starting batch MADAM-RAG...")
 
-    results = []
-    for i in tqdm(range(len(all_data)), desc="Running MADAM-RAG"):
-        entry = all_data[i]
-        documents = [doc["text"] for doc in entry["documents"]]
-        result = multi_agent_debate(entry["question"], documents, generator, num_rounds=args.num_rounds)
-        results.append(result)
+    # 執行批次辯論
+    output_filename = f"debating/final_madam_results_rounds{args.num_rounds}.jsonl"
+    output_path = os.path.join(args.data_path, output_filename)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    with open(args.output_path, "w") as f:
-        for result in results:
-            f.write(json.dumps(result) + "\n")
+    all_results = []
+    for idx_str in tqdm(folder_indices, desc="Processing Cases"):
+        idx = int(idx_str)
+        csv_path = os.path.join(ranking_dir, idx_str, "text_data", "final_scores.csv")
+        
+        if not os.path.exists(csv_path):
+            continue
+        
+        try:
+            original_caption = df_verite.iloc[idx]['caption']
+
+            # score.csv
+            df = pd.read_csv(csv_path)
+            top_k = df.sort_values(by='total', ascending=False).head(7)
+            
+            query_with_caption = (
+                f"Original Caption: '{original_caption}'\n\n"
+                "Task: Verify if this specific caption is [True], [Out-of-Context (OOC)], "
+                "or [Miscaptioned (MC)] based on the visual evidence and provided documents."
+            )
+
+            result = multi_agent_debate(
+                query=query_with_caption, 
+                documents=top_k['evidence'].tolist(), 
+                scores=top_k['total'].tolist(), 
+                generator=generator, 
+                num_rounds=args.num_rounds
+            )
+            
+            result["folder_idx"] = idx
+            all_results.append(result)
+
+            with open(output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
+            
+        except Exception as e:
+            print(f"Error processing folder {idx}: {e}")
+            continue
+
+    print(f"\nAll tasks finished. Total cases processed: {len(all_results)}")
+    print(f"Results saved to: {output_path}")
 
 if __name__ == "__main__":
     main()
