@@ -4,8 +4,10 @@ import requests
 import json
 from bs4 import BeautifulSoup
 import spacy
+import re
+import langdetect
 
-model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 headers = {'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36 Edg/122.0.0.0', 'Referer': 'https://www.google.com/'}
 nlp = spacy.load('en_core_web_sm')
 
@@ -38,11 +40,14 @@ def get_top_k_snippets_wiki(file_name, caption):
     cleaned_text = {}
     done = 0
     for index in indices:
-        if done == 3:
+        if done == 10:
             break
         try:
+            headers = {
+                'User-Agent': 'MyThesisBot/1.0 (your_email@example.com)' 
+            }
             url = "https://en.wikipedia.org/w/api.php?action=parse&page=" + data["query"]["search"][index]["title"] + "&format=json"
-            response = requests.get(url)
+            response = requests.get(url, headers=headers)
             page = json.loads(response.text)
             cleaned_text[index] = {"pagetext": remove_html_tags(page["parse"]["text"]["*"]), "title": data["query"]["search"][index]["title"], "timestamp": data["query"]["search"][index]["timestamp"]}
             done += 1
@@ -84,7 +89,7 @@ def get_top_k_snippets_ddg(file_name, caption):
     cleaned_text = {}
     done = 0
     for index in indices:
-        if done == 3: break
+        if done == 10: break
         try:
             link = data[index].get("link") or data[index].get("href")
             page = requests.get(link, headers=headers, timeout=10)
@@ -94,7 +99,7 @@ def get_top_k_snippets_ddg(file_name, caption):
             cleaned_text[index] = {
                 "pagetext": text, 
                 "title": data[index].get("title"), 
-                "timestamp": None, 
+                "timestamp": data[index].get("timestamp"), 
                 "link": link
             }
             done += 1
@@ -116,41 +121,56 @@ def get_timestamp_metadata_google(obj):
 
 def get_top_k_snippets_google(file_name, caption):
     snippets = []
-    with open(f'./data/retrieved/{file_name}/text_data/google_search.json', 'r') as f:
-        data = json.load(f)
-    if "items" in data.keys():
-        for item in data["items"]:
-            try:
-                snippets.append(remove_html_tags(item["snippet"]))
-            except:
-                continue
-    if snippets == []:
+    input_path = f'./data/retrieved/{file_name}/text_data/google_search.json'
+    
+    if not os.path.exists(input_path):
         return
+
+    with open(input_path, 'r') as f:
+        data = json.load(f)
+    
+    if not isinstance(data, list) or len(data) == 0:
+        return
+
+    for item in data:
+        try:
+            content = item.get("snippet") or item.get("text") or ""
+            if content:
+                snippets.append(remove_html_tags(content))
+        except:
+            continue
+
+    if not snippets:
+        return
+
     cosine_scores = compute_similarity(caption, snippets)
-    # top_k = min(3, len(snippets))
     values, indices = cosine_scores.topk(len(snippets))
     indices = indices.tolist()[0]
+    
     cleaned_text = {}
     done = 0
     for index in indices:
-        if done == 3:
-            break
+        if done == 10: break
         try:
-            link = data["items"][index]["link"]
-            page = requests.get(link, headers=headers)
+            link = data[index].get("link")
+            page = requests.get(link, headers=headers, timeout=10)
             soup = BeautifulSoup(page.content, 'html.parser')
             text = soup.get_text()
-            timestamp=None
-            if "pagemap" in data["items"][index].keys():
-                if "metatags" in data["items"][index]["pagemap"].keys():
-                    timestamp = get_timestamp_metadata_google(data["items"][index]["pagemap"]["metatags"][0])
-            cleaned_text[index] = {"pagetext": text, "title": data["items"][index]["title"], "timestamp": timestamp, "link": link}
+            
+            cleaned_text[index] = {
+                "pagetext": text, 
+                "title": data[index].get("title"), 
+                "timestamp": data[index].get("timestamp"), 
+                "link": link
+            }
             done += 1
         except:
             continue
-    if not os.path.exists(f'./data/filtered/{file_name}/text_data'):
-        os.makedirs(f'./data/filtered/{file_name}/text_data')
-    with open(f'./data/filtered/{file_name}/text_data/google.json', 'w') as f:
+
+    output_dir = f'./data/filtered/{file_name}/text_data'
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    with open(f'{output_dir}/google.json', 'w') as f:
         json.dump(cleaned_text, f)
         
 def get_top_k_snippets_bing(file_name, caption):
@@ -230,26 +250,114 @@ def get_clean_data_new_inverse_bing(file_name):
     with open(f'./data/filtered/{file_name}/text_data/inverse_bing.json', 'w') as f:
         json.dump(new_data, f)
         
-import langdetect
+def get_top_k_snippets_notebooklm(file_name, caption):
+    input_path = f'./data/retrieved/{file_name}/text_data/NotebookLM_search.json'
+    if not os.path.exists(input_path): return
+
+    with open(input_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    if not isinstance(data, list) or len(data) == 0: return
+
+    snippets = []
+    for item in data:
+        content = item.get("snippet") or item.get("body") or ""
+        if content:
+            snippets.append(remove_html_tags(content))
+
+    if not snippets: return
+
+    cosine_scores = compute_similarity(caption, snippets)
+    values, indices = cosine_scores.topk(len(snippets))
+    indices = indices.tolist()[0]
+    
+    cleaned_text = {}
+    done = 0
+    
+    for index in indices:
+        if done == 10: break
+        
+        orig_snippet = data[index].get("snippet") or data[index].get("body") or ""
+        text = orig_snippet
+        link = data[index].get("link")
+        
+        if link and link.startswith("http"):
+            try:
+                page = requests.get(link, headers=headers, timeout=10)
+                if page.status_code == 200:
+                    soup = BeautifulSoup(page.content, 'html.parser')
+                    scraped_text = soup.get_text().strip()
+                    
+                    if len(scraped_text) > 300 and "Page Not Found" not in scraped_text:
+                        text = scraped_text
+                else:
+                    print(f"ID {file_name}: 連結狀態碼錯誤 ({page.status_code}), 使用摘要。")
+            except Exception as e:
+                print(f"ID {file_name}: 爬蟲失敗 ({link[:30]}), 自動改用原始摘要。")
+        
+        cleaned_text[str(index)] = {
+            "pagetext": text, 
+            "title": data[index].get("title"), 
+            "timestamp": data[index].get("timestamp"), 
+            "link": link
+        }
+        done += 1
+
+    output_dir = f'./data/filtered/{file_name}/text_data'
+    os.makedirs(output_dir, exist_ok=True)
+    with open(f'{output_dir}/notebooklm.json', 'w', encoding='utf-8') as f:
+        json.dump(cleaned_text, f, ensure_ascii=False, indent=4)
 
 def split_text_into_paragraphs(text, max_words=250):
-    # Split the text into paragraphs or chucks of max_words which ever is smaller
-    if langdetect.detect(text) != 'en':
+    if not text or len(text.strip()) < 10:
         return None
+    
+    try:
+        lang = langdetect.detect(text)
+    except:
+        lang = 'en'
+
+    if lang not in ['en', 'zh-cn', 'zh-tw']:
+        return None
+
     paragraphs = []
-    doc = nlp(text)
-    sentences = [sent.text for sent in doc.sents]
-    paragraph = ""
-    for sentence in sentences:
-        if len(paragraph.split()) + len(sentence.split()) <= max_words:
-            paragraph += sentence
-        else:
-            paragraph = paragraph.strip()
+
+    if lang.startswith('zh'):
+        res_list = re.split(r'([。！？\n])', text)
+        sentences = []
+        for i in range(0, len(res_list)-1, 2):
+            sentences.append(res_list[i] + res_list[i+1])
+        if len(res_list) % 2 != 0:
+            sentences.append(res_list[-1])
+            
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 2]
+        
+        current_para = ""
+        for sent in sentences:
+            if len(current_para) + len(sent) <= max_words * 2: 
+                current_para += sent
+            else:
+                if current_para:
+                    paragraphs.append(current_para.strip())
+                current_para = sent
+        if current_para:
+            paragraphs.append(current_para.strip())
+            
+        return paragraphs if paragraphs else None
+    else:
+        doc = nlp(text)
+        sentences = [sent.text for sent in doc.sents]
+        paragraph = ""
+        for sentence in sentences:
+            if len(paragraph.split()) + len(sentence.split()) <= max_words:
+                paragraph += sentence
+            else:
+                paragraph = paragraph.strip()
+                paragraphs.append(paragraph)
+                paragraph = sentence
+        if paragraph:
             paragraphs.append(paragraph)
-            paragraph = sentence
-    if paragraph:
-        paragraphs.append(paragraph)
-    return paragraphs        
+        return paragraphs        
 
 def get_most_similar_paragraphs(file_name, caption):
     filtered_dir = f'./data/filtered/{file_name}/text_data'
@@ -306,6 +414,7 @@ def get_all_text_filtered(file_name, caption):
     get_top_k_snippets_bing(file_name, caption)
     get_top_k_snippets_ddg(file_name, caption)
     get_inverse_google(file_name)
+    get_top_k_snippets_notebooklm(file_name, caption)
     get_clean_data_new_inverse_bing(file_name)
     if not os.path.exists(f'./data/filtered/{file_name}/text_data'):
         os.makedirs(f'./data/filtered/{file_name}/text_data')
