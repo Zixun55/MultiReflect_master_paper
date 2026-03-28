@@ -1,5 +1,7 @@
 # 執行環境
 conda activate llava_env
+# 衝突辯論執行
+python run_madam_rag.py --data_path ./data
 
 # MultiReflect
 
