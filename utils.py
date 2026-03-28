@@ -5,6 +5,7 @@ from PIL import Image
 import json
 import os
 import yaml
+from transformers import CLIPProcessor, CLIPModel
 
 def load_config(config_file='config.yaml'):
     if not os.path.exists(config_file):
@@ -16,7 +17,6 @@ def load_config(config_file='config.yaml'):
 class ImageTextToImageModel():
     def __init__(self, checkpoint):
         print(f"正在載入 Qwen2-VL 模型: {checkpoint}...")
-        # 2B 模型在 11GB 顯存下運作非常輕鬆
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             checkpoint,
             torch_dtype="auto",
@@ -74,6 +74,28 @@ def get_llava_cot_response(prompt, client):
     torch.cuda.empty_cache()
     return response
 
+class CLIPConsistency:
+    def __init__(self, model_id="openai/clip-vit-large-patch14-336"):
+        print(f"正在載入 CLIP-336 模型: {model_id}...")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        self.model = CLIPModel.from_pretrained(
+            model_id, 
+            use_safetensors=True 
+        ).to(self.device)
+        
+        self.processor = CLIPProcessor.from_pretrained(model_id)
+
+    def get_similarity(self, image_path, caption):
+        image = Image.open(image_path).convert("RGB")
+        inputs = self.processor(text=[caption], images=image, return_tensors="pt", padding=True).to(self.device)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            image_embeds = outputs.image_embeds / outputs.image_embeds.norm(p=2, dim=-1, keepdim=True)
+            text_embeds = outputs.text_embeds / outputs.text_embeds.norm(p=2, dim=-1, keepdim=True)
+            similarity = (image_embeds * text_embeds).sum(dim=-1).item()
+        return similarity
+    
 # JSON 輔助函式保持不變
 def load_json(file_path):
     if not os.path.exists(file_path): return {}
