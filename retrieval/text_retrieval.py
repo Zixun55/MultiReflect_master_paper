@@ -8,6 +8,10 @@ from utils import load_config
 import time
 from ddgs import DDGS
 import os
+import re
+from dateutil import parser
+import random
+import datetime
 
 config = load_config()
 
@@ -50,11 +54,17 @@ def create_query(entities, sep=" "):
 
 def get_wikipedia_data(query):
     try:
+        headers = {
+            'User-Agent': 'MyThesisBot/1.0 (your_email@example.com)' 
+        }
         url = "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=" + query + "&format=json"
-        response = requests.get(url, timeout=60)
+        response = requests.get(url, headers=headers, timeout=60)
+        # print(response.text)
         data = json.loads(response.text)
+        
         return data
     except Exception as e:
+        print(f"wiki error: {e}")
         return {}
     
 # def get_google_data(query):
@@ -178,15 +188,58 @@ def get_ddg_data(query):
     
     try:
         with DDGS() as ddgs:
-            results_gen = ddgs.text(query, max_results=5)
+            results_gen = ddgs.text(query, max_results=10)
             results = list(results_gen)
-            
+            # print(results)
+
             formatted_results = []
             for r in results:
+                title = r.get('title', '')
+                snippet = r.get('body', '')
+                link = r.get('href', '')
+                
+                timestamp_str = None
+                
+                # 1. 從 URL 抓完整日期
+                url_full = re.search(r'/(20\d{2})/(0?[1-9]|1[0-2])/(0?[1-9]|[12][0-9]|3[01])/', link)
+                
+                # 2. 從標題或內文抓「完整格式」日期
+                text_full = re.search(r'([A-Z][a-z]{2,8}\.?\s\d{1,2},?\s20\d{2})|(\d{1,2}(?:st|nd|rd|th)?\s[A-Z][a-z]{2,8},?\s20\d{2})', title + " " + snippet)
+
+                if url_full:
+                    timestamp_str = f"{url_full.group(1)}-{url_full.group(2).zfill(2)}-{url_full.group(3).zfill(2)}"
+                elif text_full:
+                    try:
+                        dt = parser.parse(text_full.group(0), fuzzy=True)
+                        timestamp_str = dt.strftime('%Y-%m-%d')
+                    except:
+                        pass
+
+                if not timestamp_str:
+                    try:
+                        dt = parser.parse(title + " " + snippet, fuzzy=True)
+                        if 2010 <= dt.year <= 2026:
+                            timestamp_str = dt.strftime('%Y-%m-%d')
+                    except:
+                        pass
+
+                # 4. URL 的年與月
+                if not timestamp_str:
+                    url_month = re.search(r'/(20\d{2})/(0?[1-9]|1[0-2])/', link)
+                    if url_month:
+                        timestamp_str = f"{url_month.group(1)}-{url_month.group(2).zfill(2)}-01"
+
+                # 5. 單純年份
+                if not timestamp_str:
+                    year_match = re.search(r'(201[5-9]|202[0-6])', title + " " + snippet + " " + link)
+                    if year_match:
+                        timestamp_str = f"{year_match.group(1)}-01-01"
+                
                 formatted_results.append({
-                    'title': r.get('title'),
-                    'link': r.get('href'),
-                    'snippet': r.get('body'),
+                    'title': title,
+                    'link': link,
+                    'snippet': snippet,
+                    'timestamp': timestamp_str,
                     'source': 'DuckDuckGo'
                 })
             
@@ -197,22 +250,67 @@ def get_ddg_data(query):
         print(f"DuckDuckGo 搜尋失敗: {e}")
         return []
     
+def get_google_data(query):
+    results = []
+    blacklist = [
+        'convertunits.com', 'bing.com/maps', 'accounts.google.com', 
+        'translate.yandex', 'microsoft.com', 'login', 'signin', 
+        'calculator', 'weather', 'maps.google'
+    ]
+    time.sleep(random.uniform(1, 2)) 
+    
+    try:
+        with DDGS() as ddgs:
+            bang_query = f"!g {query}"
+            
+            results_gen = ddgs.text(bang_query, max_results=10)
+            res_list = list(results_gen)
+            
+            for r in res_list:
+                title = r.get('title', '')
+                snippet = r.get('body', '')
+                link = r.get('href', '')
+                
+                timestamp_str = None
+                year_match = re.search(r'(201[5-9]|202[0-6])', title + " " + snippet)
+                if year_match:
+                    timestamp_str = f"{year_match.group(1)}-01-01"
+
+                if any(k in link for k in blacklist) or any(k in title for k in blacklist):
+                    continue
+
+                results.append({
+                    "title": title,
+                    "snippet": snippet,
+                    "link": link,
+                    "timestamp": timestamp_str,
+                    "source": "Google-via-Bang"
+                })
+    except Exception as e:
+        print(f"!g 檢索失敗: {e}")
+        
+    return results
+
 def get_data(caption, img_content):
+    
     entities = get_entities(caption)
     if len(entities) == 0:
         query = caption
     else:
         query = create_query(entities)
 
-    ddg_search = get_ddg_data(query)
+    ddg_search = get_ddg_data(caption)
 
     wikipedia_search = get_wikipedia_data(query)
 
-    google_search = {}
+    google_search = get_google_data(caption)
+    # google_search = {}
+
     bing_search = {}
     inverse_google_search = {}
     inverse_bing_search = {}
     inverse_google_data = {}
     inverse_bing_data = {}
+    # print(wikipedia_search)
 
     return wikipedia_search, google_search, bing_search, inverse_google_search, inverse_bing_search, inverse_google_data, inverse_bing_data, ddg_search
