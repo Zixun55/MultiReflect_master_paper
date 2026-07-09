@@ -47,51 +47,56 @@ def evaluate_fusion_system():
 
     for idx_int, row in df_gt.iterrows():
         idx_str = str(idx_int).strip()
-        ground_truth = str(row['label']).strip().lower()
-        prediction = None
-        source = None
+        
+        base_exists = os.path.exists(f'./data/generated/{idx_int}/verification.json') or \
+                  os.path.exists(f'./data/generated/{idx_int}/verification_noevi.json')
+        
+        if base_exists:
+            ground_truth = str(row['label']).strip().lower()
+            prediction = None
+            source = None
 
-        if idx_str in madam_preds:
-            prediction = madam_preds[idx_str]
-            source = "MADAM-RAG"
-        else:
-            path_with_evi = f'./data/generated/{idx_int}/verification.json'
-            path_no_evi = f'./data/generated/{idx_int}/verification_noevi.json'
+            if idx_str in madam_preds:
+                prediction = madam_preds[idx_str]
+                source = "MADAM-RAG"
+            else:
+                path_with_evi = f'./data/generated/{idx_int}/verification.json'
+                path_no_evi = f'./data/generated/{idx_int}/verification_noevi.json'
 
-            json_path = None
-            if os.path.exists(path_with_evi):
-                json_path = path_with_evi
-                source = "Original_with_Evi"
-            elif os.path.exists(path_no_evi):
-                json_path = path_no_evi
-                source = "Original_no_Evi"
+                json_path = None
+                if os.path.exists(path_with_evi):
+                    json_path = path_with_evi
+                    source = "Original_with_Evi"
+                elif os.path.exists(path_no_evi):
+                    json_path = path_no_evi
+                    source = "Original_no_Evi"
 
-            if json_path:
-                try:
-                    with open(json_path, 'r') as f:
-                        data = json.load(f)
-                        res = data.get('response', '').upper()
-                        if 'TRUE' in res: prediction = 'true'
-                        elif 'FALSE' in res or 'MISCAPTIONED' in res: prediction = 'miscaptioned'
-                        elif 'OUT-OF-CONTEXT' in res: prediction = 'out-of-context'
-                        source = "Original"
-                except: pass
+                if json_path:
+                    try:
+                        with open(json_path, 'r') as f:
+                            data = json.load(f)
+                            res = data.get('response', '').upper()
+                            if 'TRUE' in res: prediction = 'true'
+                            elif 'FALSE' in res or 'MISCAPTIONED' in res: prediction = 'miscaptioned'
+                            elif 'OUT-OF-CONTEXT' in res: prediction = 'out-of-context'
+                            source = "Original"
+                    except: pass
 
-        if source:
-            total_count += 1
-            is_correct = (prediction == ground_truth)
-            
-            # 更新類別統計
-            if ground_truth in label_stats:
-                label_stats[ground_truth][0] += 1 # 總數 +1
+            if source:
+                total_count += 1
+                is_correct = (prediction == ground_truth)
+                
+                # 更新類別統計
+                if ground_truth in label_stats:
+                    label_stats[ground_truth][0] += 1 # 總數 +1
+                    if is_correct:
+                        label_stats[ground_truth][1] += 1 # 答對數 +1
+
                 if is_correct:
-                    label_stats[ground_truth][1] += 1 # 答對數 +1
-
-            if is_correct:
-                correct_count += 1
-            
-            status = "✅" if is_correct else "❌"
-            print(f"{idx_str:<8} | {ground_truth:<15} | {prediction:<16} | {status}")
+                    correct_count += 1
+                
+                status = "✅" if is_correct else "❌"
+                print(f"{idx_str:<8} | {ground_truth:<15} | {prediction:<16} | {status}")
 
     # 4. 產出最終統計報告
     print("\n" + "="*65)
