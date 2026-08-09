@@ -1,15 +1,18 @@
-from consistency import llava_consistency
+from consistency import clip_consistency
+from consistency import blip_consistency
 from eval_check import llava_evalcheck
 from retrieval import text_retrieval, image_retrieval
 from filtering import filtering_text, filtering_image
 from ranking import combined
 from verification import verify
+from verification import verify_noevi
 from utils import *
 
 # from openai import OpenAI
 import pandas as pd
 import os
 import re
+import time
 from PIL import Image
 
 # api_key = os.getenv("OPENAI_API_KEY")
@@ -21,11 +24,14 @@ config = load_config()
 client = ImageTextToImageModel(config['model_id'])
 
 def consistency_response(image_path, caption, idx):
-    response = llava_consistency.get_response(image_path, caption, client)
+    # CLIP-336做第一次consistency
+    response = clip_consistency.get_response(image_path, caption, client)
     verdict = 0
+
     if not os.path.exists(f"{config['output_path']}/generated/{idx}/"):
         os.makedirs(f"{config['output_path']}/generated/{idx}/")
     save_json({"consistency_response": response}, f"{config['output_path']}/generated/{idx}/consistency_response.json")
+
     if "<verdict>TRUE</verdict>" in response:
         verdict = 1
     elif "<verdict>FALSE</verdict>" in response:
@@ -42,12 +48,52 @@ def consistency_response(image_path, caption, idx):
                 verdict = 0 
             else:
                 verdict = 0
+    
     score = re.findall(r"(?<![a-zA-Z:])[-+]?\d*\.?\d+", response)
+    
     if len(score) == 0:
         score = 0
     else:
         score = float(score[0])
+
+    # BLIP-ITM做第二次consistency
+    if verdict == 0 and score >= 0.25:
+        print(f"Sample {idx}: CLIP Passed ({score}). Running BLIP verification...")
+        
+        blip_v, blip_s = blip_consistency.blip_verdict(image_path, caption)
+                
+        save_json({
+            "clip_response": response,
+            "blip_score": blip_s,
+            "blip_verdict": blip_v
+        }, f"{config['output_path']}/generated/{idx}/consistency_response.json")
+
+        if blip_v == 1:
+            verdict = 1
+
     return verdict, score
+
+# def consistency_response(image_path, caption, idx):
+#     # 建立輸出路徑 (維持原有名稱與邏輯)
+#     if not os.path.exists(f"{config['output_path']}/generated/{idx}/"):
+#         os.makedirs(f"{config['output_path']}/generated/{idx}/")
+
+#     # 只執行 BLIP-ITM 做 consistency
+#     # 這裡 blip_v 對應判定結果 (1 or 0)，blip_s 對應匹配分數 (score)
+#     blip_v, blip_s = blip_consistency.blip_verdict(image_path, caption)
+    
+#     # 為了對應回傳變數名稱，將其指派給 verdict 與 score
+#     verdict = blip_v
+#     score = blip_s
+                
+#     # 儲存 JSON (維持原有的儲存習慣，僅保留 BLIP 相關資訊)
+#     save_json({
+#         "blip_score": score,
+#         "blip_verdict": verdict
+#     }, f"{config['output_path']}/generated/{idx}/consistency_response.json")
+
+#     # 回傳變數名稱保持為 verdict, score
+#     return verdict, score
 
 def eval_check_response(image_path, caption, text_evidences, image_evidences, idx, first):
     if first:
@@ -92,38 +138,51 @@ def eval_check_response(image_path, caption, text_evidences, image_evidences, id
         return needs_retrieval
 
 def get_evidences(image_path, caption, idx):
-    with open(image_path, "rb") as f:
-        image_content = f.read()
-
-    # Text Retrieval
-    res = text_retrieval.get_data(caption, image_content)
-    wikipedia_search, google_search, bing_search, inverse_google_search, \
-    inverse_bing_search, inverse_google_data, inverse_bing_data, ddg_search = res
-
     text_path = f"{config['output_path']}/retrieved/{idx}/text_data"
-    if not os.path.exists(text_path):
-        os.makedirs(text_path)
-
-    save_json(wikipedia_search, f"{text_path}/wikipedia_search.json")
-    save_json(google_search, f"{text_path}/google_search.json")
-    save_json(bing_search, f"{text_path}/bing_search.json")
-    save_json(inverse_google_search, f"{text_path}/inverse_google_search.json")
-    save_json(inverse_bing_search, f"{text_path}/inverse_bing_search.json")
-    save_json(inverse_google_data if isinstance(inverse_google_data, list) else [], f"{text_path}/inverse_google_data.json")
-    save_json(inverse_bing_data if isinstance(inverse_bing_data, list) else [], f"{text_path}/inverse_bing_data.json")
-    save_json(ddg_search, f"{text_path}/ddg_search.json")
-
-    # Image Retrieval
-    google_image_data, bing_image_data, commons_data, ddg_data = image_retrieval.get_image_data(caption, idx)
-    
     img_path = f"{config['output_path']}/retrieved/{idx}/image_data"
-    if not os.path.exists(img_path):
-        os.makedirs(img_path)
+    text_done = os.path.exists(f"{text_path}/ddg_search.json")
+    img_done = os.path.exists(f"{img_path}/ddg_data.json")
+
+    if not text_done:
+        print(f"Sample {idx}: 執行文字檢索...")
+        with open(image_path, "rb") as f:
+            image_content = f.read()
+
+        # Text Retrieval
+        res = text_retrieval.get_data(caption, image_content)
+        wikipedia_search, google_search, bing_search, inverse_google_search, \
+        inverse_bing_search, inverse_google_data, inverse_bing_data, ddg_search = res
+
+        text_path = f"{config['output_path']}/retrieved/{idx}/text_data"
+        if not os.path.exists(text_path):
+            os.makedirs(text_path)
+
+        save_json(wikipedia_search, f"{text_path}/wikipedia_search.json")
+        save_json(google_search, f"{text_path}/google_search.json")
+        save_json(bing_search, f"{text_path}/bing_search.json")
+        save_json(inverse_google_search, f"{text_path}/inverse_google_search.json")
+        save_json(inverse_bing_search, f"{text_path}/inverse_bing_search.json")
+        save_json(inverse_google_data if isinstance(inverse_google_data, list) else [], f"{text_path}/inverse_google_data.json")
+        save_json(inverse_bing_data if isinstance(inverse_bing_data, list) else [], f"{text_path}/inverse_bing_data.json")
+        save_json(ddg_search, f"{text_path}/ddg_search.json")
+    else:
+        print(f"Sample {idx}: 文字檢索已存在。")
+
+    if not img_done:
+        # Image Retrieval
+        print(f"Sample {idx}: 執行圖片檢索...")
+        google_image_data, bing_image_data, commons_data, ddg_data = image_retrieval.get_image_data(caption, idx)
+        
+        img_path = f"{config['output_path']}/retrieved/{idx}/image_data"
+        if not os.path.exists(img_path):
+            os.makedirs(img_path)
     
-    save_json(google_image_data, f"{img_path}/google_image_data.json")
-    save_json(bing_image_data, f"{img_path}/bing_image_data.json")
-    save_json(commons_data, f"{img_path}/commons_data.json")
-    save_json(ddg_data, f"{img_path}/ddg_data.json")
+        save_json(google_image_data, f"{img_path}/google_image_data.json")
+        save_json(bing_image_data, f"{img_path}/bing_image_data.json")
+        save_json(commons_data, f"{img_path}/commons_data.json")
+        save_json(ddg_data, f"{img_path}/ddg_data.json")
+    else:
+        print(f"Sample {idx}: 圖片檢索已存在。")
 
 def init_pipeline(image_path, caption, idx):
     print('Checking Consistency for Sample', idx)
@@ -190,7 +249,7 @@ def init_pipeline(image_path, caption, idx):
             curr_image_idx = 0
 
             max_text_limit = 5 
-            max_image_limit = 1
+            max_image_limit = 2
 
             while True:
                 print(f"--- 迴圈嘗試中: 目前文字證據數 {len(selected_text_evidences)} / 圖片數 {len(selected_image_evidences)} ---")
@@ -223,7 +282,7 @@ def init_pipeline(image_path, caption, idx):
             print('No Retrieval Needed for Sample', idx)
             print('-'*50)
             print('Verifying for Sample', idx)
-            verify.get_response_subs(idx, image_path, caption, [], [], client)
+            verify_noevi.get_response_subs(idx, image_path, caption, None, client)
             print('Verification Done for Sample', idx)
             print('-'*50)
             print('-'*50)
@@ -231,16 +290,16 @@ def init_pipeline(image_path, caption, idx):
         print('Consistency Verdict is False for Sample', idx)
         print('-'*50)
         print('Verifying for Sample', idx)
-        verify.get_response_subs(idx, image_path, caption, [], [], client)
+        verify_noevi.get_response_subs(idx, image_path, caption, consistency_score, client)
         print('Verification Done for Sample', idx)
         print('-'*50)
         print('-'*50)
         
-
+start_time = time.time()
 df = pd.read_csv(f"{config['data_path']}/VERITE.csv")
 
-# input_num = len(df)
-input_num = 50
+input_num = len(df)
+# input_num = 100
 
 for idx in range(input_num):
     try:
@@ -255,6 +314,18 @@ for idx in range(input_num):
     except Exception as e:
         print(e, idx)
         continue
+
+end_time = time.time()
+total_duration = end_time - start_time
+
+print("\n" + "="*30)
+print(f"總執行樣本數: {input_num}")
+print(f"總執行時間: {total_duration:.2f} 秒")
+    
+minutes = int(total_duration // 60)
+seconds = total_duration % 60
+print(f"格式化時間: {minutes} 分 {seconds:.2f} 秒")
+print("="*30)
 
 # caption = df.iloc[7]['caption']
 # image_path = f"{config['data_path']}/{df.iloc[7]['image_path']}"
